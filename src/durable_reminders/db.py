@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 
 CREATE TABLE IF NOT EXISTS clock_state (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
-    current_time TEXT NOT NULL
+    clock_time TEXT NOT NULL
 );
 """
 
@@ -108,15 +108,15 @@ class SQLiteClockStore:
 
     def get(self) -> datetime | None:
         row = self._conn.execute(
-            "SELECT current_time FROM clock_state WHERE id = 1"
+            "SELECT clock_time FROM clock_state WHERE id = 1"
         ).fetchone()
         if row is None:
             return None
-        return datetime.fromisoformat(row["current_time"])
+        return datetime.fromisoformat(row["clock_time"])
 
     def set(self, dt: datetime) -> None:
         self._conn.execute(
-            "INSERT INTO clock_state(id, current_time) VALUES (1, ?) "
-            "ON CONFLICT(id) DO UPDATE SET current_time = excluded.current_time",
+            "INSERT INTO clock_state(id, clock_time) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET clock_time = excluded.clock_time",
             (dt.isoformat(),),
         )
