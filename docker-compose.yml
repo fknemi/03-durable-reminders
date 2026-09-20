@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   reminders-api:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     ports:
@@ -10,8 +10,8 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      - DATABASE_URL=sqlite:////app/data/reminders.db
-      - WORKER_ENABLED=true  
-      - LOG_LEVEL=INFO
-    command: uvicorn src.durable_reminders.main:app --host 0.0.0.0 --port 8000
+      - REMINDERS_DB=/app/data/reminders.db
+      - REMINDERS_CLOCK=system
+      - REMINDERS_WORKER_INTERVAL=1.0
+    command: uvicorn durable_reminders.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
