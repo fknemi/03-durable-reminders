@@ -1,31 +1,38 @@
 # Demo Script
 
-Target: 4–6 minutes. Five scenarios, in order, ending on the benchmark.
+Target: 4–6 minutes. Five scenarios, ending on the benchmark.
+Uses the fake clock so every step is deterministic and instant.
 
-Before recording:
+Time convention: the clock starts at 2024-01-01T06:30:00Z, which is
+12:00:00 in Asia/Kolkata. Reminder times below are expressed in local
+Kolkata time; the service converts them to UTC internally.
 
-    cd 03-durable-reminders
+## Setup (do before recording)
+
+Two terminals side by side, large font (14–16pt), dark background.
+
+Right terminal — start the server:
+
+    cd ~/Downloads/03-durable-reminders
     source .venv/bin/activate
-    python -m pytest -v                     # show all 25 passing on camera
-    rm -f demo.db demo.db-wal demo.db-shm   # clean slate for the demo
+    rm -f demo.db demo.db-wal demo.db-shm
 
-Set the environment for fake-clock mode so time is controllable:
-
-    export REMINDERS_DB=demo.db
-    export REMINDERS_CLOCK=fake
-    export REMINDERS_INITIAL_TIME=2024-01-01T12:00:00+00:00
-
-Start the service in one terminal:
-
+    REMINDERS_DB=demo.db \
+    REMINDERS_CLOCK=fake \
+    REMINDERS_INITIAL_TIME=2024-01-01T06:30:00+00:00 \
     uvicorn durable_reminders.main:app --port 8000
 
-Keep a second terminal for curl.
+Left terminal — prove the tests pass before the demo:
+
+    python -m pytest -v
+
+Leave the passing output on screen for 5 seconds.
 
 ---
 
 ## Scenario 1 — Scheduled delivery (AC1)
 
-Create a reminder for 30 simulated seconds from now, in Kolkata.
+Create a reminder 30 simulated seconds in the future, Kolkata time:
 
     curl -s -X POST localhost:8000/reminders \
       -H 'content-type: application/json' \
@@ -33,178 +40,221 @@ Create a reminder for 30 simulated seconds from now, in Kolkata.
       | python -m json.tool
 
 Point out: status `scheduled`, version `1`, `delivery_key` ends in `:v1`,
-`tz_policy` is `unambiguous`.
+`tz_policy` is `unambiguous`, `scheduled_at_utc` is `06:30:30Z`.
 
-Not due yet — run a tick:
+Tick without advancing — not due yet:
 
-    curl -s -X POST localhost:8000/_test/tick -d '{}' -H 'content-type: application/json'
-    # {"claimed":0,...}
+    curl -s -X POST localhost:8000/_test/tick \
+      -H 'content-type: application/json' -d '{}'
+
+Returns `{"claimed":0,...}`.
 
 Advance the clock 60 simulated seconds and tick again:
 
     curl -s -X POST localhost:8000/_test/clock/advance \
       -H 'content-type: application/json' -d '{"seconds":60}'
-    curl -s -X POST localhost:8000/_test/tick -d '{}' -H 'content-type: application/json'
-    # {"claimed":1,"delivered":1,...}
+
+    curl -s -X POST localhost:8000/_test/tick \
+      -H 'content-type: application/json' -d '{}'
+
+Returns `{"claimed":1,"delivered":1,...}`.
 
 Inspect the reminder:
 
     curl -s localhost:8000/reminders | python -m json.tool
 
-Status `delivered`, one attempt with outcome `success`, `delivered_at` set.
+Status is `delivered`, one attempt with outcome `success`.
 
     curl -s localhost:8000/metrics | python -m json.tool
-    # logical_notifications: 1
+
+Shows `logical_notifications: 1`.
+
+Narrate: "One notification, one logical occurrence. No wall-clock waiting —
+the injected clock controlled the timing."
+
+Clock is now at 06:31:00 UTC (12:01 IST).
 
 ---
 
 ## Scenario 2 — Restart recovery (AC2)
 
-Create a reminder 60 simulated seconds out, then stop the service before it
-fires.
+Create a reminder 60 simulated seconds in the future:
 
     curl -s -X POST localhost:8000/reminders \
       -H 'content-type: application/json' \
-      -d '{"content":"survive-restart","fire_at_local":"2024-01-01T12:01:00","timezone":"Asia/Kolkata"}'
+      -d '{"content":"survive-restart","fire_at_local":"2024-01-01T12:02:00","timezone":"Asia/Kolkata"}'
 
-Ctrl-C the uvicorn process.
+Due at 06:32:00 UTC. Clock is at 06:31:00 UTC, so it is not yet due.
 
-Now "time passes while the service is down." Restart uvicorn against the same
-`demo.db`:
+Ctrl-C uvicorn. Say: "The service is now stopped. Time will advance while
+it's down. The reminder is still sitting in the database, still scheduled,
+waiting for a worker that isn't running."
 
+Restart with the same env vars:
+
+    REMINDERS_DB=demo.db \
+    REMINDERS_CLOCK=fake \
+    REMINDERS_INITIAL_TIME=2024-01-01T06:30:00+00:00 \
     uvicorn durable_reminders.main:app --port 8000
 
-Advance the clock past the due instant and tick:
+Optionally, show the reminder is still scheduled after restart:
+
+    curl -s localhost:8000/reminders | python -m json.tool
+
+Advance past due and tick:
 
     curl -s -X POST localhost:8000/_test/clock/advance \
       -H 'content-type: application/json' -d '{"seconds":120}'
-    curl -s -X POST localhost:8000/_test/tick -d '{}' -H 'content-type: application/json'
 
-The overdue reminder is discovered and delivered. Point out: nothing was
-lost across the restart because the schedule lives in SQLite, not in memory.
+    curl -s -X POST localhost:8000/_test/tick \
+      -H 'content-type: application/json' -d '{}'
+
+    curl -s localhost:8000/reminders | python -m json.tool
+
+The overdue reminder is discovered and delivered.
+
+Narrate: "The schedule lives in SQLite. The restart lost nothing. The
+recovered worker found the overdue reminder on its first tick."
+
+Clock is now at 06:33:00 UTC (12:03 IST).
 
 ---
 
-## Scenario 3 — Edit racing execution (AC5)
+## Scenario 3 — Edit before execution (AC5, AC6)
 
-Create a reminder due in 30 seconds.
+Create a reminder due in 120 simulated seconds:
 
     curl -s -X POST localhost:8000/reminders \
       -H 'content-type: application/json' \
-      -d '{"content":"v1 content","fire_at_local":"2024-01-01T12:00:30","timezone":"Asia/Kolkata"}' \
+      -d '{"content":"v1 content","fire_at_local":"2024-01-01T12:05:00","timezone":"Asia/Kolkata"}' \
       | tee /tmp/r.json | python -m json.tool
 
-Advance past due, then claim without delivering by hand:
+Due at 06:35:00 UTC. Clock is at 06:33:00 UTC.
+
+Advance past due:
 
     curl -s -X POST localhost:8000/_test/clock/advance \
-      -H 'content-type: application/json' -d '{"seconds":60}'
+      -H 'content-type: application/json' -d '{"seconds":180}'
 
-Now, before the tick, edit the reminder:
+Clock is now at 06:36:00 UTC, so the reminder is overdue but no tick has
+run yet.
+
+Edit the reminder before the tick runs:
 
     RID=$(python -c "import json;print(json.load(open('/tmp/r.json'))['id'])")
+
     curl -s -X PATCH localhost:8000/reminders/$RID \
       -H 'content-type: application/json' \
       -d '{"content":"v2 content"}' | python -m json.tool
 
-Version is now 2, `delivery_key` ends in `:v2`.
+Version is now 2, `delivery_key` ends in `:v2`. v1 never had a chance to
+fire because no worker had claimed it yet.
 
-Run a tick. The worker claims v2 (the current version) and delivers it.
-There is no way for v1 to fire later because v1 was never claimed; if it
-had been claimed, the commit-time version check would have recorded it as
-`superseded`. State this in the narration — it's decision 7.
+Tick and inspect:
 
-    curl -s -X POST localhost:8000/_test/tick -d '{}' -H 'content-type: application/json'
+    curl -s -X POST localhost:8000/_test/tick \
+      -H 'content-type: application/json' -d '{}'
+
     curl -s localhost:8000/reminders/$RID | python -m json.tool
 
-Point out: one attempt, `success`, content `v2 content`.
+v2 delivered, one success attempt. v1 never fired.
 
-(If you want to show the superseded path explicitly, keep the process running
-and use the test suite — `test_edit_before_execution_old_version_superseded`
-walks it step by step.)
+Then run the race tests to show the superseded path explicitly:
+
+    python -m pytest tests/test_races.py -v
+
+Narrate: "The live demo showed edit landing before any claim. The test
+shows edit landing after the claim but before the commit. Both paths end
+the same way — v1 never delivers. That's how edit and cancel always win
+over in-flight execution — acceptance criteria five and six."
 
 ---
 
-## Scenario 4 — Duplicate execution, one logical notification (AC4)
+## Scenario 4 — Duplicate execution, one notification (AC4)
 
-Create a reminder, advance past due, tick once — delivered.
-
-    curl -s -X POST localhost:8000/reminders \
-      -H 'content-type: application/json' \
-      -d '{"content":"dedupe-me","fire_at_local":"2024-01-01T12:00:30","timezone":"Asia/Kolkata"}'
-    curl -s -X POST localhost:8000/_test/clock/advance \
-      -H 'content-type: application/json' -d '{"seconds":60}'
-    curl -s -X POST localhost:8000/_test/tick -d '{}' -H 'content-type: application/json'
-
-Metrics:
-
-    curl -s localhost:8000/metrics | python -m json.tool
-
-Now demonstrate the idempotency ledger directly with SQLite:
-
-    sqlite3 demo.db "SELECT delivery_key FROM deliveries;"
-
-Point out: one row per successful occurrence, keyed by `(reminder_id, version)`.
-Even if the worker retried or a second worker raced, `INSERT OR IGNORE` would
-make the second attempt a no-op, and the attempt log would record a
-`success` outcome from the duplicate detection. The user receives one
-logical notification.
-
-The strongest version of this scenario is the test
-`test_crash_after_destination_before_commit` — mention it and, if time
-allows, run it on camera:
+Run the idempotency tests:
 
     python -m pytest tests/test_idempotency.py -v
 
+Narrate: "`test_crash_after_destination_before_commit` is the key case.
+The destination was called, the worker 'died' before committing, and
+recovery replayed the send. The ledger returned DUPLICATE. One logical
+notification."
+
+Show the ledger for the current demo DB:
+
+    sqlite3 demo.db "SELECT delivery_key FROM deliveries;"
+
+One row per successful occurrence.
+
 ---
 
-## Scenario 5 — Benchmark, architecture, one trade-off (close)
-
-Run the benchmark live:
+## Scenario 5 — Benchmark, architecture, one trade-off
 
     python -m benchmark.run_benchmark
 
-Read the output aloud:
+Let the output sit for 5 seconds. Narrate:
 
-    steps advanced:       2
-    reminders by status:  {'cancelled': 3, 'delivered': 19, 'failed': 2}
-    logical notifications: 19
-    RESULT: PASS
-
-Narrate what just happened:
-
-- 24 reminders across `Asia/Kolkata` and `America/New_York`.
+- 24 reminders across Asia/Kolkata and America/New_York.
 - 3 edited, 3 cancelled, 5 temporary failures, 2 permanent failures,
   1 duplicate-executed.
-- The service was stopped and restarted before processing.
-- An injected clock advanced until everything settled.
-- The invariant: `logical_notifications == delivered`.
+- The service is stopped and restarted before processing all due work.
+- The injected clock advances until processing settles.
+- Invariant: logical notifications == delivered.
 
-Show `docs/architecture.md` for ~20 seconds and name the three seams:
+Open `docs/architecture.md` for ~20 seconds. Name the three seams:
 
-- `clock.py` — every read of "now" is injectable.
-- `destination.py` — the idempotency ledger.
+- `clock.py` — injectable time.
+- `destination.py` — idempotency ledger.
 - `worker.py` — claim, deliver, commit-with-version-check, reap.
 
-Close on one trade-off, stated plainly:
+Close with the trade-off:
 
-> "The destination ledger is in the same SQLite database. That collapses the
-> dual-write problem — the send and the state update happen in one
-> transaction — which is the honest simplification for a six-hour exercise.
-> A real external provider would need a transactional outbox: write the
-> intent to send in the same transaction as the state change, and let a
-> separate relay deliver it with the idempotency key. I documented that as
-> the production upgrade in `docs/decisions.md`."
+> "The destination ledger is in the same SQLite database. That collapses
+> the dual-write problem — the send and the state update happen in one
+> transaction — which is the honest simplification for a six-hour
+> exercise. A real external provider would need a transactional outbox:
+> write the send intent in the same transaction as the state change, and
+> let a separate relay deliver it with the idempotency key. I documented
+> that as the production upgrade in `docs/decisions.md`."
 
-That last sentence — naming what would change and why — is what earns the
-"Communication and trade-offs" credit and separates "I know what this code
-does" from "I know what it can't do."
+---
+
+## Clock position after each scenario
+
+| After | Clock (UTC) | Clock (IST) |
+| --- | --- | --- |
+| Setup | 06:30:00 | 12:00 |
+| S1 | 06:31:00 | 12:01 |
+| S2 | 06:33:00 | 12:03 |
+| S3 | 06:36:00 | 12:06 |
+| S4, S5 | unchanged | unchanged |
+
+If you re-run any scenario, first re-check the clock position. Do not
+re-run S1's creation step after S1 — it will be immediately overdue.
 
 ---
 
 ## Recording tips
 
-- 1080p, one terminal font size large enough to read at 720p.
-- Show `python -m pytest -v` at the start so the reviewer knows the tests
-  pass before the demo starts.
-- Keep the benchmark output visible for a full 5 seconds at the end.
-- Do not narrate the code; narrate the behavior and the decisions.
+- 1080p, font readable at 720p.
+- Show `python -m pytest -v` for 5 seconds at the start.
+- Hold the benchmark output on screen for 5 seconds at the end.
+- Narrate behavior and decisions, not code.
+- If a command outputs something unexpected, leave it in. Real output
+  is more convincing than a re-take.
+
+## Upload
+
+Host unlisted on YouTube, Loom, or Drive with "anyone with the link can
+view." Then add to `SUBMISSION.md` under `## Demo`:
+
+    Video: <url>
+
+    See `demo/demo_script.md` for the scenarios demonstrated.
+
+Then:
+
+    git add SUBMISSION.md demo/demo_script.md
+    git commit -m "docs: correct demo script timings for fake-clock flow"
+    git push

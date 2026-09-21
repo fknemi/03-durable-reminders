@@ -131,6 +131,12 @@ cannot be recalled. Closing this gap requires a transactional outbox with a
 destination-side cancellation tombstone, which is documented as the
 production upgrade.
 
+
 ## Demo
 
-See `demo/demo_script.md`.
+Video: https://youtu.be/KO0TWopETtw
+
+The video walks the five scenarios: scheduled delivery, restart recovery,
+edit racing execution, duplicate execution without duplicate notification,
+and the verification benchmark. `demo/demo_script.md` has the commands and
+timing used.
